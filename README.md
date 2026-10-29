@@ -5,8 +5,6 @@ A production-ready, distributed, and scalable AI-Powered Document Intelligence S
 ---
 
 ## 🏛 System Architecture
-
-![System Architecture Diagram](./assets/architecture.png)
 ![System Architecture Diagram](./assets/architecture.svg)
 
 Every component runs containerized and orchestrated via **Docker Compose** across isolated Docker bridge networks:

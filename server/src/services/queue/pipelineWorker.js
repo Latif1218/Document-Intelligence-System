@@ -11,15 +11,13 @@ import { documentRepository } from '../document/Dependencies/dependencies.js';
 
 
 // PipelineWorker
-
 class PipelineWorker {
   constructor() {
     this.worker = null;
   }
 
-  
+
   // Helper to convert readable stream from MinIO S3 into a Buffer
-  
   async streamToBuffer(stream) {
     return new Promise((resolve, reject) => {
       const chunks = [];
@@ -31,7 +29,6 @@ class PipelineWorker {
 
   
   // Execute pipeline stages for a given job
-  
   async processJob(job) {
     const { documentId, filePath, fileType, originalFilename } = job.data;
     const startTime = Date.now();
@@ -41,8 +38,6 @@ class PipelineWorker {
     try {
       // Update status to processing
       await documentRepository.updateStatus(documentId, 'processing', null);
-
-      // Download & Python Processing (OCR / Text Extraction)
 
       await publishProgress(documentId, {
         stage: 'ocr_parsing',
@@ -112,8 +107,8 @@ class PipelineWorker {
         aiDuration
       );
 
+
       // Validation Engine
-      
       await publishProgress(documentId, {
         stage: 'validation',
         percent: 75,
@@ -140,9 +135,7 @@ class PipelineWorker {
       // Persist validation errors if any
       await documentRepository.saveValidationErrors(documentId, validationResult.errors);
 
-      
       // Semantic Vector Embeddings & Final Persistence
-      
       await publishProgress(documentId, {
         stage: 'embedding',
         percent: 90,
@@ -160,28 +153,35 @@ class PipelineWorker {
         );
       }
 
-      // Save structured invoice and line items
-      const invoiceData = {
-        ...aiOutput.extracted,
-        raw_ai_response: aiOutput.raw_ai_response,
-        needs_review: validationResult.needsReview,
-      };
 
-      await documentRepository.saveInvoiceAndItems(
-        documentId,
-        invoiceData,
-        aiOutput.extracted.line_items || []
-      );
+      const invoicesToSave = (Array.isArray(aiOutput.extracted.invoices) && aiOutput.extracted.invoices.length > 0)
+        ? aiOutput.extracted.invoices.map((inv) => ({
+            ...inv,
+            raw_ai_response: aiOutput.raw_ai_response,
+            needs_review: validationResult.needsReview,
+          }))
+        : [{
+            ...aiOutput.extracted,
+            raw_ai_response: aiOutput.raw_ai_response,
+            needs_review: validationResult.needsReview,
+          }];
+
+      await documentRepository.saveInvoicesList(documentId, invoicesToSave);
 
       // Update document status to completed
       await documentRepository.updateStatus(documentId, 'completed', null);
 
       const totalPipelineDuration = Date.now() - startTime;
+      const invoiceCount = invoicesToSave.length;
+      const completionSummary = invoiceCount > 1
+        ? `Batch document processed successfully: Extracted and validated ${invoiceCount} distinct invoices in ${totalPipelineDuration}ms`
+        : `Entire document processing pipeline successfully completed in ${totalPipelineDuration}ms`;
+
       await documentRepository.addProcessingHistory(
         documentId,
         'pipeline',
         'completed',
-        `Entire document processing pipeline successfully completed in ${totalPipelineDuration}ms`,
+        completionSummary,
         totalPipelineDuration
       );
 
@@ -191,11 +191,14 @@ class PipelineWorker {
         percent: 100,
         status: 'completed',
         needs_review: validationResult.needsReview,
-        message: 'Document processing finished successfully',
+        invoice_count: invoiceCount,
+        message: invoiceCount > 1
+          ? `Successfully extracted and validated ${invoiceCount} invoices`
+          : 'Document processing finished successfully',
       });
 
-      logger.info(`Pipeline completed successfully for document ${documentId} in ${totalPipelineDuration}ms`);
-      return { success: true, documentId };
+      logger.info(`Pipeline completed successfully for document ${documentId} (${invoiceCount} invoice(s)) in ${totalPipelineDuration}ms`);
+      return { success: true, documentId, invoiceCount };
     } catch (error) {
       logger.error(`Pipeline failed for document ${documentId}`, {
         error: error.message,

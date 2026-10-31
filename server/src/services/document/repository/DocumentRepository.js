@@ -4,6 +4,7 @@ import { APPLICATION_ROLES } from '../../../shared/constants/roles.js';
 
 
 // DocumentRepository
+
 class DocumentRepository extends BaseRepository {
   constructor() {
     super('documents');
@@ -40,17 +41,22 @@ class DocumentRepository extends BaseRepository {
       }
     }
 
-    // Fetch Invoices and Line Items
-    const invoiceSql = `SELECT * FROM invoices WHERE document_id = $1 LIMIT 1;`;
-    const invoiceRes = await this.query(invoiceSql, [documentId]);
-    const invoice = invoiceRes.rows[0] || null;
 
-    let lineItems = [];
-    if (invoice) {
+    const invoiceSql = `SELECT * FROM invoices WHERE document_id = $1 ORDER BY created_at ASC;`;
+    const invoiceRes = await this.query(invoiceSql, [documentId]);
+    const invoicesRows = invoiceRes.rows;
+
+    const allInvoices = [];
+    for (const inv of invoicesRows) {
       const itemsSql = `SELECT * FROM line_items WHERE invoice_id = $1 ORDER BY created_at ASC;`;
-      const itemsRes = await this.query(itemsSql, [invoice.id]);
-      lineItems = itemsRes.rows;
+      const itemsRes = await this.query(itemsSql, [inv.id]);
+      allInvoices.push({
+        ...inv,
+        line_items: itemsRes.rows,
+      });
     }
+
+    const primaryInvoice = allInvoices[0] || null;
 
     // Fetch Validation Errors
     const errorsSql = `SELECT * FROM validation_errors WHERE document_id = $1 ORDER BY created_at ASC;`;
@@ -78,13 +84,14 @@ class DocumentRepository extends BaseRepository {
       ...doc,
       client: clientInfo,
       extracted_pages: pagesRes.rows,
-      invoice: invoice ? { ...invoice, line_items: lineItems } : null,
+      invoice: primaryInvoice, // 100% Backward-compatible single invoice
+      invoices: allInvoices,   // Full array of all extracted invoices for this document
       validation_errors: errorsRes.rows,
       processing_history: historyRes.rows,
     };
   }
 
-  
+
   // Save extracted text per page with vector embeddings
   async saveExtractedPage(documentId, pageNumber, rawText, embedding = null) {
     const sql = `
@@ -97,11 +104,10 @@ class DocumentRepository extends BaseRepository {
     return result.rows[0];
   }
 
-  
-  // Save or update structured invoice extraction along with line items inside a transaction
-  async saveInvoiceAndItems(documentId, invoiceData, lineItems = []) {
+
+  async saveInvoicesList(documentId, invoicesList = []) {
     return await this.withTransaction(async (client) => {
-      // Delete existing invoice for this doc if reprocessing
+      // Delete existing invoices for this doc if reprocessing
       await client.query(`DELETE FROM invoices WHERE document_id = $1;`, [documentId]);
 
       const insertInvoiceSql = `
@@ -114,47 +120,76 @@ class DocumentRepository extends BaseRepository {
         RETURNING *;
       `;
 
-      const invoiceRes = await client.query(insertInvoiceSql, [
-        documentId,
-        invoiceData.invoice_number || null,
-        invoiceData.invoice_date || null,
-        invoiceData.supplier_name || null,
-        invoiceData.customer_name || null,
-        invoiceData.subtotal !== undefined ? invoiceData.subtotal : null,
-        invoiceData.tax !== undefined ? invoiceData.tax : null,
-        invoiceData.total !== undefined ? invoiceData.total : null,
-        invoiceData.currency || 'USD',
-        JSON.stringify(invoiceData.evidence_quotes || {}),
-        JSON.stringify(invoiceData.raw_ai_response || {}),
-        invoiceData.needs_review || false,
-        invoiceData.confidence_score || 1.0,
-      ]);
+      const insertItemSql = `
+        INSERT INTO line_items (invoice_id, description, quantity, unit_price, total_amount)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING *;
+      `;
 
-      const savedInvoice = invoiceRes.rows[0];
+      const savedInvoices = [];
 
-      // Insert line items
-      const savedItems = [];
-      for (const item of lineItems) {
-        const itemSql = `
-          INSERT INTO line_items (invoice_id, description, quantity, unit_price, total_amount)
-          VALUES ($1, $2, $3, $4, $5)
-          RETURNING *;
-        `;
-        const itemRes = await client.query(itemSql, [
-          savedInvoice.id,
-          item.description || '',
-          item.quantity || 1,
-          item.unit_price || 0,
-          item.total_amount || 0,
+      for (const inv of invoicesList) {
+        const invoiceRes = await client.query(insertInvoiceSql, [
+          documentId,
+          inv.invoice_number || null,
+          inv.invoice_date || null,
+          inv.supplier_name || null,
+          inv.customer_name || null,
+          inv.subtotal !== undefined && inv.subtotal !== null ? inv.subtotal : null,
+          inv.tax !== undefined && inv.tax !== null ? inv.tax : null,
+          inv.total !== undefined && inv.total !== null ? inv.total : null,
+          inv.currency || 'USD',
+          JSON.stringify(inv.evidence_quotes || {}),
+          JSON.stringify(inv.raw_ai_response || {}),
+          inv.needs_review || false,
+          inv.confidence_score || 1.0,
         ]);
-        savedItems.push(itemRes.rows[0]);
+
+        const savedInvoice = invoiceRes.rows[0];
+        const lineItems = Array.isArray(inv.line_items) ? inv.line_items : [];
+        const savedItems = [];
+
+        for (const item of lineItems) {
+          const itemRes = await client.query(insertItemSql, [
+            savedInvoice.id,
+            item.description || '',
+            item.quantity || 1,
+            item.unit_price || 0,
+            item.total_amount || 0,
+          ]);
+          savedItems.push(itemRes.rows[0]);
+        }
+
+        savedInvoices.push({
+          ...savedInvoice,
+          line_items: savedItems,
+        });
       }
 
-      return {
-        ...savedInvoice,
-        line_items: savedItems,
-      };
+      return savedInvoices;
     });
+  }
+
+
+  async saveInvoiceAndItems(documentId, invoiceData, lineItems = []) {
+    // If invoiceData is an array of invoices
+    if (Array.isArray(invoiceData)) {
+      const results = await this.saveInvoicesList(documentId, invoiceData);
+      return results[0] || null;
+    }
+    // If invoiceData has invoices list from AI extraction
+    if (Array.isArray(invoiceData?.invoices) && invoiceData.invoices.length > 0) {
+      const results = await this.saveInvoicesList(documentId, invoiceData.invoices);
+      return results[0] || null;
+    }
+
+    // Single invoice fallback
+    const singleInv = {
+      ...invoiceData,
+      line_items: lineItems.length > 0 ? lineItems : (invoiceData.line_items || []),
+    };
+    const results = await this.saveInvoicesList(documentId, [singleInv]);
+    return results[0] || null;
   }
 
   
@@ -199,6 +234,7 @@ class DocumentRepository extends BaseRepository {
 
   
   // List documents with multi-tenant client isolation
+
   async listDocuments({ clientId = null, userId = null, role = null, status = null, limit = 20, offset = 0 }) {
     const conditions = [];
     const params = [];
@@ -269,9 +305,19 @@ class DocumentRepository extends BaseRepository {
     }
 
     return await this.withTransaction(async (client) => {
-      const { line_items, ...invoiceFields } = updates;
+      const { line_items, invoice_id, ...invoiceFields } = updates;
 
-      if (Object.keys(invoiceFields).length > 0) {
+      // Identify target invoice (specific invoice_id or primary invoice)
+      let targetInvoiceId = invoice_id;
+      if (!targetInvoiceId) {
+        const invRes = await client.query(
+          `SELECT id FROM invoices WHERE document_id = $1 ORDER BY created_at ASC LIMIT 1;`,
+          [documentId]
+        );
+        targetInvoiceId = invRes.rows[0]?.id || null;
+      }
+
+      if (Object.keys(invoiceFields).length > 0 && targetInvoiceId) {
         const keys = Object.keys(invoiceFields);
         const values = Object.values(invoiceFields);
         const setClause = keys.map((key, i) => `${key} = $${i + 1}`).join(', ');
@@ -279,25 +325,21 @@ class DocumentRepository extends BaseRepository {
         const sql = `
           UPDATE invoices
           SET ${setClause}, needs_review = FALSE, updated_at = CURRENT_TIMESTAMP
-          WHERE document_id = $${keys.length + 1}
+          WHERE id = $${keys.length + 1}
           RETURNING *;
         `;
-        await client.query(sql, [...values, documentId]);
+        await client.query(sql, [...values, targetInvoiceId]);
       }
 
-      if (Array.isArray(line_items)) {
-        const invoiceRes = await client.query(`SELECT id FROM invoices WHERE document_id = $1;`, [documentId]);
-        if (invoiceRes.rows[0]) {
-          const invoiceId = invoiceRes.rows[0].id;
-          await client.query(`DELETE FROM line_items WHERE invoice_id = $1;`, [invoiceId]);
+      if (Array.isArray(line_items) && targetInvoiceId) {
+        await client.query(`DELETE FROM line_items WHERE invoice_id = $1;`, [targetInvoiceId]);
 
-          for (const item of line_items) {
-            await client.query(
-              `INSERT INTO line_items (invoice_id, description, quantity, unit_price, total_amount)
-               VALUES ($1, $2, $3, $4, $5);`,
-              [invoiceId, item.description, item.quantity, item.unit_price, item.total_amount]
-            );
-          }
+        for (const item of line_items) {
+          await client.query(
+            `INSERT INTO line_items (invoice_id, description, quantity, unit_price, total_amount)
+             VALUES ($1, $2, $3, $4, $5);`,
+            [targetInvoiceId, item.description, item.quantity, item.unit_price, item.total_amount]
+          );
         }
       }
 

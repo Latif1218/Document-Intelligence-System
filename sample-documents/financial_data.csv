@@ -1,0 +1,7 @@
+Invoice Number,Invoice Date,Supplier Name,Customer Name,Item Description,Quantity,Unit Price,Total Amount,Subtotal,Tax,Total,Currency
+INV-2026-0891,2026-10-28,Apex Technologies Corp,CareGuide Health Services,Enterprise AI Cloud Server Setup,1,1200.00,1200.00,2000.00,160.00,2160.00,USD
+INV-2026-0891,2026-10-28,Apex Technologies Corp,CareGuide Health Services,Document Processing OCR Pipeline,2,400.00,800.00,2000.00,160.00,2160.00,USD
+INV-2026-0892,2026-10-29,CloudMatrix Global,CareGuide Health Services,PostgreSQL Distributed Cluster Node,1,850.00,850.00,1450.00,145.00,1595.00,USD
+INV-2026-0892,2026-10-29,CloudMatrix Global,CareGuide Health Services,Managed Redis Cluster Cache,2,300.00,600.00,1450.00,145.00,1595.00,USD
+INV-2026-0893,2026-10-29,DataCorp Systems,CareGuide Health Services,Vector Database Storage Subscription,1,500.00,500.00,500.00,50.00,550.00,USD
+

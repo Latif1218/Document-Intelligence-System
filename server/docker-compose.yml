@@ -14,7 +14,7 @@ services:
       - edge-net
       - app-net
 
-  # DATA LAYER: PostgreSQL 16 with pgvector
+  # DATA LAYER PostgreSQL 16 with pgvector
   postgres:
     image: pgvector/pgvector:pg16
     container_name: docintel_postgres
@@ -36,7 +36,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # QUEUE LAYER: Redis 7
+  # QUEUE LAYER Redis 7
   redis:
     image: redis:7-alpine
     container_name: docintel_redis
@@ -55,7 +55,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # STORAGE LAYER: MinIO(For(S3-Compatible via pgsty/silo))
+  # STORAGE LAYER MinIO(For(S3-Compatible via pgsty/silo))
   minio:
     image: pgsty/silo:latest
     container_name: docintel_minio
@@ -96,7 +96,27 @@ services:
       timeout: 5s
       retries: 3
 
-  # APPLICATION LAYER: Node.js Express REST API
+  # dashboard server
+  dashboard:
+    build:
+      context: ../dashboard
+      dockerfile: Dockerfile
+    container_name: docintel_dashboard
+    restart: unless-stopped
+    ports:
+      - "${DASHBOARD_PORT:-3000}:80"
+    depends_on:
+      - api
+    networks:
+      - edge-net
+      - app-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:80/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # APPLICATION LAYER Node.js Express REST API
   api:
     build:
       context: .
@@ -118,7 +138,7 @@ services:
       - backend-net
       - data-net
 
-  # WORKER NETWORK: BullMQ Pipeline Worker
+  # WORKER NETWORK BullMQ Pipeline Worker
   worker:
     build:
       context: .

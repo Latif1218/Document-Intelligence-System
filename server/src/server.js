@@ -13,7 +13,6 @@ import errorHandler from './shared/middlewares/errorHandler.js';
 import ResponseFormatter from './shared/utils/responseFormatter.js';
 import AppError from './shared/utils/AppError.js';
 
-
 // Domain Routers
 import authRouter from './services/auth/routes/authRoutes.js';
 import clientRouter from './services/client/routes/clientRoutes.js';
@@ -125,7 +124,7 @@ app.use('/documents', documentRouter);
 app.use('/search', searchRouter);
 
 
-// 404 Route Not Found Handler 
+// 404 Route Not Found Handler
 app.use((req, res, next) => {
   next(new AppError(`Route not found: ${req.method} ${req.originalUrl}`, 404));
 });
@@ -136,33 +135,40 @@ app.use(errorHandler);
 
 
 // Start Server and Initialize External Storage
-const server = app.listen(config.app.port, async () => {
-  logger.info(`Document Intelligence REST API running on port: ${config.app.port} [${config.app.env}]`);
-  try {
-    await ensureBucketExists();
-    logger.info('Storage layer successfully verified');
-  } catch (err) {
-    logger.error('Failed to initialize storage bucket on startup', { error: err.message });
-  }
-});
+let server;
+if (process.env.NODE_ENV !== 'test') {
+  server = app.listen(config.app.port, async () => {
+    logger.info(`Document Intelligence REST API running on port: ${config.app.port} [${config.app.env}]`);
+    try {
+      await ensureBucketExists();
+      logger.info('Storage layer successfully verified');
+    } catch (err) {
+      logger.error('Failed to initialize storage bucket on startup', { error: err.message });
+    }
+  });
+}
 
 
 // Graceful Shutdown Handlers
 const shutdown = async (signal) => {
   logger.info(`${signal} signal received: closing HTTP server...`);
-  server.close(async () => {
-    logger.info('HTTP server closed.');
-    try {
-      await postgres.pool.end();
-      logger.info('Database connections closed.');
-      await redisClient.quit();
-      logger.info('Redis client disconnected.');
-      process.exit(0);
-    } catch (err) {
-      logger.error('Error during graceful shutdown', { error: err.message });
-      process.exit(1);
-    }
-  });
+  if (server) {
+    server.close(async () => {
+      logger.info('HTTP server closed.');
+      try {
+        await postgres.pool.end();
+        logger.info('Database connections closed.');
+        await redisClient.quit();
+        logger.info('Redis client disconnected.');
+        process.exit(0);
+      } catch (err) {
+        logger.error('Error during graceful shutdown', { error: err.message });
+        process.exit(1);
+      }
+    });
+  } else {
+    process.exit(0);
+  }
 };
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
